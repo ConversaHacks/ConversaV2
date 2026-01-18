@@ -18,6 +18,12 @@ from .config import config
 from .audio_capture import AudioCapture
 from .action_service import VADCommand
 
+try:
+    from .webrtc_capture import WebRTCCapture, WEBRTC_AVAILABLE
+except ImportError:
+    WEBRTC_AVAILABLE = False
+    WebRTCCapture = None
+
 
 class RecordingService:
     """
@@ -28,8 +34,9 @@ class RecordingService:
     Exports synchronized video + audio files.
     """
 
-    def __init__(self, audio_capture: AudioCapture):
+    def __init__(self, audio_capture: AudioCapture, webrtc_url: Optional[str] = None):
         self.audio_capture = audio_capture
+        self.webrtc_url = webrtc_url
 
         # Video settings
         self.fps = config.recording.fps
@@ -48,6 +55,8 @@ class RecordingService:
         self._is_running = False
         self._is_recording = False
         self._capture: Optional[cv2.VideoCapture] = None
+        self._webrtc_capture: Optional[WebRTCCapture] = None
+        self._use_webrtc = webrtc_url is not None
         self._lock = threading.Lock()
 
         # Threads
@@ -64,28 +73,44 @@ class RecordingService:
         if self._is_running:
             return
 
-        # Open webcam
-        self._capture = cv2.VideoCapture(0)
-        if not self._capture.isOpened():
-            raise RuntimeError("Failed to open webcam")
+        if self._use_webrtc:
+            # Use WebRTC stream
+            if not WEBRTC_AVAILABLE:
+                raise RuntimeError("WebRTC not available. Install with: pip install aiortc aiohttp")
 
-        # Set resolution
-        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self._capture.set(cv2.CAP_PROP_FPS, self.fps)
+            self._webrtc_capture = WebRTCCapture(self.webrtc_url)
+            self._webrtc_capture.start()
 
-        # Get actual settings
-        actual_width = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_height = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = self._capture.get(cv2.CAP_PROP_FPS)
+            self._is_running = True
 
-        self._is_running = True
+            # Start capture thread for WebRTC frames
+            self._capture_thread = threading.Thread(target=self._webrtc_capture_loop, daemon=True)
+            self._capture_thread.start()
 
-        # Start capture thread
-        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._capture_thread.start()
+            print(f"[RecordingService] Started (WebRTC: {self.webrtc_url})")
+        else:
+            # Open local webcam
+            self._capture = cv2.VideoCapture(0)
+            if not self._capture.isOpened():
+                raise RuntimeError("Failed to open webcam")
 
-        print(f"[RecordingService] Started (resolution={actual_width}x{actual_height}, fps={actual_fps})")
+            # Set resolution
+            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self._capture.set(cv2.CAP_PROP_FPS, self.fps)
+
+            # Get actual settings
+            actual_width = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self._capture.get(cv2.CAP_PROP_FPS)
+
+            self._is_running = True
+
+            # Start capture thread
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._capture_thread.start()
+
+            print(f"[RecordingService] Started (resolution={actual_width}x{actual_height}, fps={actual_fps})")
 
     def stop(self):
         """Stop video capture."""
@@ -99,7 +124,40 @@ class RecordingService:
             self._capture.release()
             self._capture = None
 
+        if self._webrtc_capture:
+            self._webrtc_capture.stop()
+            self._webrtc_capture = None
+
         print("[RecordingService] Stopped")
+
+    def _webrtc_capture_loop(self):
+        """Capture loop for WebRTC frames."""
+        frame_interval = 1.0 / self.fps
+        last_frame_time = time.time()
+
+        while self._is_running:
+            current_time = time.time()
+
+            # Maintain frame rate
+            elapsed = current_time - last_frame_time
+            if elapsed < frame_interval:
+                time.sleep(frame_interval - elapsed)
+                continue
+
+            last_frame_time = current_time
+
+            # Get frame from WebRTC
+            frame = self._webrtc_capture.get_frame()
+            if frame is None:
+                continue
+
+            with self._lock:
+                # Always add to rolling buffer
+                self._frame_buffer.append((current_time, frame.copy()))
+
+                # If recording, add to recording buffer
+                if self._is_recording:
+                    self._recording_frames.append((current_time, frame.copy()))
 
     def _capture_loop(self):
         """Main video capture loop (runs in separate thread)."""
@@ -149,8 +207,11 @@ class RecordingService:
             # Copy pre-buffer frames to recording buffer
             self._recording_frames = list(self._frame_buffer)
 
-            # Start audio recording
-            self.audio_capture.start_recording()
+            # Start audio recording (from WebRTC or local mic)
+            if self._use_webrtc and self._webrtc_capture:
+                self._webrtc_capture.start_audio_recording()
+            else:
+                self.audio_capture.start_recording()
 
             print(f"[RecordingService] Recording started (pre-buffer: {len(self._recording_frames)} frames)")
 
@@ -162,8 +223,15 @@ class RecordingService:
 
             self._is_recording = False
 
-            # Get audio data
-            audio_data = self.audio_capture.stop_recording()
+            # Get audio data (from WebRTC or local mic)
+            if self._use_webrtc and self._webrtc_capture:
+                audio_data = self._webrtc_capture.stop_audio_recording()
+                audio_sample_rate = self._webrtc_capture.audio_sample_rate
+                audio_channels = self._webrtc_capture.audio_channels
+            else:
+                audio_data = self.audio_capture.stop_recording()
+                audio_sample_rate = self.audio_capture.sample_rate
+                audio_channels = self.audio_capture.channels
 
             # Get video frames
             frames = self._recording_frames.copy()
@@ -179,7 +247,8 @@ class RecordingService:
         audio_path = self.output_dir / f"recording_{timestamp}.wav"
 
         # Save files
-        success = self._save_recording(frames, audio_data, video_path, audio_path)
+        success = self._save_recording(frames, audio_data, video_path, audio_path,
+                                       audio_sample_rate, audio_channels)
 
         if success:
             print(f"[RecordingService] Saved: {video_path.name}")
@@ -191,9 +260,13 @@ class RecordingService:
         frames: list,
         audio_data: bytes,
         video_path: Path,
-        audio_path: Path
+        audio_path: Path,
+        audio_sample_rate: int = 16000,
+        audio_channels: int = 1
     ) -> bool:
         """Save video and audio files."""
+        import wave
+
         try:
             # Save video
             if frames:
@@ -217,7 +290,11 @@ class RecordingService:
 
             # Save audio
             if audio_data:
-                self.audio_capture.save_wav(audio_data, str(audio_path))
+                with wave.open(str(audio_path), "wb") as wav_file:
+                    wav_file.setnchannels(audio_channels)
+                    wav_file.setsampwidth(2)  # 16-bit audio
+                    wav_file.setframerate(audio_sample_rate)
+                    wav_file.writeframes(audio_data)
 
             return True
 

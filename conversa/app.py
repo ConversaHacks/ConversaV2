@@ -29,20 +29,18 @@ class ConversaApp:
     - ValidationService: AI-powered validation
     """
 
-    def __init__(self, show_preview: bool = True):
+    def __init__(self, show_preview: bool = True, webrtc_url: str = None):
         self.show_preview = show_preview
+        self.webrtc_url = webrtc_url
 
         # Initialize components
         self.audio_capture = AudioCapture()
-        self.recording_service = RecordingService(self.audio_capture)
+        self.recording_service = RecordingService(self.audio_capture, webrtc_url=webrtc_url)
         self.gemini_client = GeminiClient()
         self.validation_service = ValidationService(self.gemini_client)
 
-        # ActionService with command callback
-        self.action_service = ActionService(
-            self.audio_capture,
-            on_command=self._on_vad_command
-        )
+        # ActionService will be initialized in start() after WebRTC is connected
+        self.action_service = None
 
         # State
         self._is_running = False
@@ -70,7 +68,18 @@ class ConversaApp:
         # Start services
         self.audio_capture.start()
         self.recording_service.start()
+
+        # Initialize ActionService AFTER RecordingService has started
+        # This ensures WebRTC capture is available if using WebRTC mode
+        webrtc_capture = self.recording_service._webrtc_capture if self.webrtc_url else None
+
+        self.action_service = ActionService(
+            self.audio_capture,
+            on_command=self._on_vad_command,
+            webrtc_capture=webrtc_capture
+        )
         self.action_service.start()
+
         self.validation_service.start()
 
         self._is_running = True
@@ -88,7 +97,8 @@ class ConversaApp:
         self._is_running = False
 
         # Stop services in reverse order
-        self.action_service.stop()
+        if self.action_service:
+            self.action_service.stop()
         self.recording_service.stop()
         self.audio_capture.stop()
         self.validation_service.stop()
@@ -144,7 +154,7 @@ class ConversaApp:
                        0.7, (0, 255, 0), 2)
 
         # Speech indicator
-        if self.action_service.is_speech_active:
+        if self.action_service and self.action_service.is_speech_active:
             cv2.putText(frame, "SPEECH DETECTED", (10, frame.shape[0] - 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
@@ -167,6 +177,8 @@ def main():
                        help="Run without preview window")
     parser.add_argument("--process-pending", action="store_true",
                        help="Process pending recordings and exit")
+    parser.add_argument("--webrtc", type=str, metavar="URL",
+                       help="Use WebRTC stream as video source instead of local webcam")
 
     args = parser.parse_args()
 
@@ -187,7 +199,7 @@ def main():
         print("Done.")
     else:
         # Normal operation
-        app = ConversaApp(show_preview=not args.no_preview)
+        app = ConversaApp(show_preview=not args.no_preview, webrtc_url=args.webrtc)
 
         # Handle signals
         def signal_handler(sig, frame):

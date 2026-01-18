@@ -1,18 +1,21 @@
 """
 ActionService - Voice Activity Detection (VAD)
 
-Captures audio from microphone continuously and analyzes energy levels
-to detect speech. Sends START/STOP commands to trigger recording.
+Captures audio from microphone or WebRTC stream continuously and analyzes
+energy levels to detect speech. Sends START/STOP commands to trigger recording.
 """
 
 import threading
 import time
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 import numpy as np
 
 from .config import config
 from .audio_capture import AudioCapture
+
+if TYPE_CHECKING:
+    from .webrtc_capture import WebRTCCapture
 
 
 class VADCommand(Enum):
@@ -27,23 +30,38 @@ class ActionService:
 
     Analyzes audio energy levels and zero-crossing rate to detect speech.
     Uses adaptive threshold that adjusts to background noise.
+    Supports both local microphone and WebRTC audio sources.
     """
 
     def __init__(
         self,
         audio_capture: AudioCapture,
         on_command: Optional[Callable[[VADCommand], None]] = None,
+        webrtc_capture: Optional["WebRTCCapture"] = None,
     ):
         self.audio_capture = audio_capture
         self.on_command = on_command
+        self._webrtc_capture = webrtc_capture
+        self._use_webrtc = webrtc_capture is not None
 
         # VAD parameters from config
-        self.energy_threshold = config.vad.energy_threshold
-        self.zcr_min = config.vad.zero_cross_rate_min
         self.zcr_max = config.vad.zero_cross_rate_max
 
-        # Frame counters
-        self._chunks_per_second = config.vad.sample_rate / config.vad.chunk_size
+        # Frame counters - adjust for WebRTC sample rate if needed
+        if self._use_webrtc:
+            # WebRTC typically uses 48kHz
+            self._sample_rate = 48000
+            self._chunk_size = 960  # 20ms at 48kHz
+            # WebRTC opus-encoded audio has different characteristics
+            self.zcr_min = 0.005  # Lower threshold for WebRTC
+            self.energy_threshold = 0.002  # Lower energy threshold for compressed audio
+        else:
+            self._sample_rate = config.vad.sample_rate
+            self._chunk_size = config.vad.chunk_size
+            self.zcr_min = config.vad.zero_cross_rate_min
+            self.energy_threshold = config.vad.energy_threshold
+
+        self._chunks_per_second = self._sample_rate / self._chunk_size
         self.speech_confirm_frames = int(config.vad.speech_confirm_time * self._chunks_per_second)
         self.silence_threshold_frames = int(config.vad.silence_threshold_time * self._chunks_per_second)
 
@@ -57,6 +75,10 @@ class ActionService:
         self._noise_level = self.energy_threshold
         self._noise_alpha = 0.995  # Slow adaptation for background noise
 
+        # WebRTC audio buffer for VAD analysis
+        self._webrtc_audio_buffer: list = []
+        self._webrtc_vad_recording = False
+
         # Thread
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -68,28 +90,61 @@ class ActionService:
 
         self._is_running = True
 
-        # Set audio callback
-        self.audio_capture.set_audio_callback(self._analyze_audio)
+        if self._use_webrtc:
+            # Start WebRTC audio capture for VAD
+            self._start_webrtc_vad()
+            print(f"[ActionService] Started with WebRTC audio (speech_confirm={self.speech_confirm_frames} frames, "
+                  f"silence_threshold={self.silence_threshold_frames} frames)")
+        else:
+            # Set local audio callback
+            self.audio_capture.set_audio_callback(self._analyze_audio)
+            print(f"[ActionService] Started with local mic (speech_confirm={self.speech_confirm_frames} frames, "
+                  f"silence_threshold={self.silence_threshold_frames} frames)")
 
         # Start analysis thread
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-        print(f"[ActionService] Started (speech_confirm={self.speech_confirm_frames} frames, "
-              f"silence_threshold={self.silence_threshold_frames} frames)")
-
     def stop(self):
         """Stop VAD analysis."""
         self._is_running = False
+        self._webrtc_vad_recording = False
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
         print("[ActionService] Stopped")
 
+    def _start_webrtc_vad(self):
+        """Start capturing WebRTC audio for VAD analysis."""
+        self._webrtc_vad_recording = True
+        self._webrtc_audio_buffer = []
+
     def _run(self):
         """Main VAD loop (runs in separate thread)."""
-        while self._is_running:
-            time.sleep(0.01)  # Small sleep to prevent busy loop
+        if self._use_webrtc:
+            self._run_webrtc_vad()
+        else:
+            # For local mic, just sleep as audio comes via callback
+            while self._is_running:
+                time.sleep(0.01)
+
+    def _run_webrtc_vad(self):
+        """Poll WebRTC audio and analyze for VAD."""
+        while self._is_running and self._webrtc_capture:
+            # Get latest audio chunk for VAD analysis
+            audio_bytes = self._webrtc_capture.get_vad_audio_chunk()
+
+            if audio_bytes:
+                # Convert bytes to numpy array
+                audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+
+                # Normalize to float [-1, 1] for analysis
+                audio_float = audio_data.astype(np.float32) / 32768.0
+
+                # Analyze the audio chunk
+                self._analyze_audio(audio_float)
+
+            time.sleep(0.01)  # ~10ms polling interval
 
     def _analyze_audio(self, audio_data: np.ndarray):
         """Analyze audio chunk for voice activity."""

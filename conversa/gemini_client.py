@@ -2,7 +2,7 @@
 GeminiClient - API Communication
 
 Handles communication with Gemini API for audio validation.
-Supports both native Gemini API and proxy mode (Anthropic Messages API format).
+Supports both native Gemini API and OpenAI-compatible proxy mode.
 """
 
 import base64
@@ -19,7 +19,7 @@ class GeminiClient:
 
     Two modes:
     - Native Gemini API: Direct to Google's API
-    - Proxy Mode: Uses Anthropic Messages API format (for custom proxies)
+    - Proxy Mode: Uses OpenAI chat completions format (for custom proxies)
     """
 
     def __init__(
@@ -110,17 +110,16 @@ class GeminiClient:
         return self._parse_response(response.json())
 
     def _validate_proxy_mode(self, audio_data: bytes) -> Optional[bool]:
-        """Use Anthropic Messages API format (for proxies)."""
+        """Use OpenAI chat completions format (for proxies)."""
         # Encode audio to base64
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
 
-        # Build request in Anthropic format
-        url = f"{self.base_url}/v1/messages"
+        # Build request in OpenAI format
+        url = f"{self.base_url}/v1/chat/completions"
 
         headers = {
             "Content-Type": "application/json",
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01"
+            "Authorization": f"Bearer {self.api_key}"
         }
 
         payload = {
@@ -130,11 +129,10 @@ class GeminiClient:
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "audio/wav",
-                            "data": audio_b64
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_b64,
+                            "format": "wav"
                         }
                     },
                     {
@@ -178,13 +176,14 @@ class GeminiClient:
             return None
 
     def _parse_proxy_response(self, response_data: Dict[str, Any]) -> Optional[bool]:
-        """Parse Anthropic-format proxy response."""
+        """Parse OpenAI chat completions format response."""
         try:
-            content = response_data.get("content", [])
-            if not content:
+            choices = response_data.get("choices", [])
+            if not choices:
                 return None
 
-            text = content[0].get("text", "")
+            message = choices[0].get("message", {})
+            text = message.get("content", "")
             return self._extract_voice_result(text)
 
         except Exception as e:
