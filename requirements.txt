@@ -1,0 +1,17 @@
+# Conversa - Conversation Recording System
+# Dependencies
+
+# Audio capture
+pyaudio>=0.2.13
+
+# Video capture and processing
+opencv-python>=4.8.0
+
+# Numerical operations
+numpy>=1.24.0
+
+# HTTP requests for Gemini API
+requests>=2.31.0
+
+# Environment variable management (optional)
+python-dotenv>=1.0.0
