@@ -19,3 +19,10 @@ python-dotenv>=1.0.0
 # WebRTC support (optional - for remote stream capture)
 aiortc>=1.6.0
 aiohttp>=3.9.0
+
+# Face recognition (requires dlib - may need cmake installed)
+# On macOS: brew install cmake
+# face_recognition>=1.3.0
+
+# Alternative: Use dlib directly if face_recognition fails
+# dlib>=19.24.0

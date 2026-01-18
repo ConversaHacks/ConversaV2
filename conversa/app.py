@@ -2,9 +2,10 @@
 Conversa - Main Application
 
 Conversation recording system that automatically detects speech,
-records video+audio, and validates using AI (Gemini).
+records video+audio, and processes using AI (Gemini) for speaker identification.
 """
 
+import os
 import signal
 import sys
 import time
@@ -15,6 +16,7 @@ from .audio_capture import AudioCapture
 from .action_service import ActionService, VADCommand
 from .recording_service import RecordingService
 from .transcription_service import TranscriptionService
+from .speaker_identification_service import SpeakerIdentificationService
 
 
 class ConversaApp:
@@ -28,9 +30,10 @@ class ConversaApp:
     - ValidationService: AI-powered validation
     """
 
-    def __init__(self, show_preview: bool = True, webrtc_url: str = None):
+    def __init__(self, show_preview: bool = True, webrtc_url: str = None, use_speaker_id: bool = True):
         self.show_preview = show_preview
         self.webrtc_url = webrtc_url
+        self.use_speaker_id = use_speaker_id
 
         # Initialize components
         self.audio_capture = AudioCapture()
@@ -39,6 +42,12 @@ class ConversaApp:
             on_transcription=self._on_transcription
         )
 
+        # Speaker identification service (uses Gemini for video analysis)
+        if use_speaker_id:
+            self.speaker_id_service = SpeakerIdentificationService()
+        else:
+            self.speaker_id_service = None
+
         # ActionService will be initialized in start() after WebRTC is connected
         self.action_service = None
 
@@ -46,14 +55,35 @@ class ConversaApp:
         self._is_running = False
 
     def _on_transcription(self, video_path: str, audio_path: str, segments: list):
-        """Handle transcription result - this is where you add actions."""
-        # segments is list of (speaker, start_s, end_s, text)
-        # Combine all text for now
+        """Handle transcription result - process with speaker identification."""
+        # segments is list of (speaker, start_s, end_s, text) from Snowflake
         full_transcript = " ".join(text for _, _, _, text in segments)
-        print(f"[Conversa] Transcript ready: {full_transcript[:100]}...")
+        print(f"[Conversa] Snowflake transcript ready: {full_transcript[:100]}...")
 
-        # TODO: Add your actions here based on the transcript
-        # e.g., send to another service, trigger commands, etc.
+        # Use Gemini for speaker identification and upload to backend
+        if self.speaker_id_service and segments:
+            print("[Conversa] Processing with Gemini for speaker identification...")
+            try:
+                # Get location from environment or use default
+                location = os.getenv("CONVERSA_LOCATION", "Unknown Location")
+
+                # Process with Gemini (key frames + transcript for speaker ID)
+                result = self.speaker_id_service.process_recording(
+                    video_path, audio_path, location,
+                    transcript_segments=segments  # Pass Snowflake transcript
+                )
+
+                if result.success:
+                    # Upload to backend
+                    conversation_id = self.speaker_id_service.send_to_backend(result)
+                    if conversation_id:
+                        print(f"[Conversa] Conversation saved to backend: {conversation_id}")
+                    else:
+                        print("[Conversa] Warning: Failed to save to backend")
+                else:
+                    print(f"[Conversa] Speaker identification failed: {result.error}")
+            except Exception as e:
+                print(f"[Conversa] Error in speaker identification: {e}")
 
     def _on_vad_command(self, command: VADCommand):
         """Handle VAD commands."""
@@ -70,6 +100,8 @@ class ConversaApp:
         print("=" * 50)
         print("CONVERSA - Conversation Recording System")
         print("=" * 50)
+        print()
+        print(f"Speaker Identification: {'Enabled (Gemini)' if self.speaker_id_service else 'Disabled'}")
         print()
 
         # Ensure output directories exist
@@ -112,6 +144,10 @@ class ConversaApp:
         self.recording_service.stop()
         self.audio_capture.stop()
         self.transcription_service.stop()
+
+        # Clean up speaker identification service
+        if self.speaker_id_service:
+            self.speaker_id_service.close()
 
         # Close preview window
         cv2.destroyAllWindows()
