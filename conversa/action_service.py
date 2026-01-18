@@ -52,9 +52,9 @@ class ActionService:
             # WebRTC typically uses 48kHz
             self._sample_rate = 48000
             self._chunk_size = 960  # 20ms at 48kHz
-            # WebRTC opus-encoded audio has different characteristics
-            self.zcr_min = 0.005  # Lower threshold for WebRTC
-            self.energy_threshold = 0.002  # Lower energy threshold for compressed audio
+            # WebRTC audio - higher threshold to ignore static noise
+            self.zcr_min = 0.01
+            self.energy_threshold = 0.015  # Higher to filter out static
         else:
             self._sample_rate = config.vad.sample_rate
             self._chunk_size = config.vad.chunk_size

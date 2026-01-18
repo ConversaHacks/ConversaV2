@@ -14,8 +14,7 @@ from .config import config
 from .audio_capture import AudioCapture
 from .action_service import ActionService, VADCommand
 from .recording_service import RecordingService
-from .validation_service import ValidationService
-from .gemini_client import GeminiClient
+from .transcription_service import TranscriptionService
 
 
 class ConversaApp:
@@ -36,14 +35,25 @@ class ConversaApp:
         # Initialize components
         self.audio_capture = AudioCapture()
         self.recording_service = RecordingService(self.audio_capture, webrtc_url=webrtc_url)
-        self.gemini_client = GeminiClient()
-        self.validation_service = ValidationService(self.gemini_client)
+        self.transcription_service = TranscriptionService(
+            on_transcription=self._on_transcription
+        )
 
         # ActionService will be initialized in start() after WebRTC is connected
         self.action_service = None
 
         # State
         self._is_running = False
+
+    def _on_transcription(self, video_path: str, audio_path: str, segments: list):
+        """Handle transcription result - this is where you add actions."""
+        # segments is list of (speaker, start_s, end_s, text)
+        # Combine all text for now
+        full_transcript = " ".join(text for _, _, _, text in segments)
+        print(f"[Conversa] Transcript ready: {full_transcript[:100]}...")
+
+        # TODO: Add your actions here based on the transcript
+        # e.g., send to another service, trigger commands, etc.
 
     def _on_vad_command(self, command: VADCommand):
         """Handle VAD commands."""
@@ -53,7 +63,7 @@ class ConversaApp:
             result = self.recording_service.stop_recording()
             if result:
                 video_path, audio_path = result
-                self.validation_service.queue_for_validation(video_path, audio_path)
+                self.transcription_service.queue_for_transcription(video_path, audio_path)
 
     def start(self):
         """Start all services."""
@@ -80,13 +90,13 @@ class ConversaApp:
         )
         self.action_service.start()
 
-        self.validation_service.start()
+        self.transcription_service.start()
 
         self._is_running = True
 
         print()
         print("Services started. Listening for speech...")
-        print("Press 'q' in preview window or Ctrl+C to quit.")
+        print("Keys: [r] start recording | [s] stop recording | [q] quit")
         print()
 
     def stop(self):
@@ -101,8 +111,7 @@ class ConversaApp:
             self.action_service.stop()
         self.recording_service.stop()
         self.audio_capture.stop()
-        self.validation_service.stop()
-        self.gemini_client.close()
+        self.transcription_service.stop()
 
         # Close preview window
         cv2.destroyAllWindows()
@@ -123,10 +132,23 @@ class ConversaApp:
                         frame = self._add_status_overlay(frame)
                         cv2.imshow("Conversa Preview", frame)
 
-                    # Check for quit key
+                    # Check for keys
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
                         break
+                    elif key == ord('r'):
+                        # Manual start recording
+                        if not self.recording_service.is_recording:
+                            print("[Manual] Starting recording...")
+                            self.recording_service.start_recording()
+                    elif key == ord('s'):
+                        # Manual stop recording
+                        if self.recording_service.is_recording:
+                            print("[Manual] Stopping recording...")
+                            result = self.recording_service.stop_recording()
+                            if result:
+                                video_path, audio_path = result
+                                self.transcription_service.queue_for_transcription(video_path, audio_path)
                 else:
                     # No preview - just sleep
                     time.sleep(0.1)
@@ -158,12 +180,17 @@ class ConversaApp:
             cv2.putText(frame, "SPEECH DETECTED", (10, frame.shape[0] - 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        # Validation queue
-        queue_size = self.validation_service.queue_size
+        # Transcription queue
+        queue_size = self.transcription_service.queue_size
         if queue_size > 0:
-            cv2.putText(frame, f"Validating: {queue_size}",
+            cv2.putText(frame, f"Transcribing: {queue_size}",
                        (frame.shape[1] - 150, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+        # Keybind hint
+        cv2.putText(frame, "[r] rec | [s] stop | [q] quit",
+                   (frame.shape[1] - 200, frame.shape[0] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         return frame
 
@@ -178,28 +205,29 @@ def main():
     parser.add_argument("--process-pending", action="store_true",
                        help="Process pending recordings and exit")
     parser.add_argument("--webrtc", type=str, metavar="URL",
-                       help="Use WebRTC stream as video source instead of local webcam")
+                       help="WebRTC stream URL (default: from config)")
 
     args = parser.parse_args()
 
     if args.process_pending:
         # Process pending recordings only
         print("Processing pending recordings...")
-        gemini_client = GeminiClient()
-        validation_service = ValidationService(gemini_client)
-        validation_service.start()
-        validation_service.process_pending()
+        transcription_service = TranscriptionService()
+        transcription_service.start()
+        transcription_service.process_pending()
 
         # Wait for queue to empty
-        while validation_service.queue_size > 0:
+        while transcription_service.queue_size > 0:
             time.sleep(0.5)
 
-        validation_service.stop()
-        gemini_client.close()
+        transcription_service.stop()
         print("Done.")
     else:
-        # Normal operation
-        app = ConversaApp(show_preview=not args.no_preview, webrtc_url=args.webrtc)
+        # Always use WebRTC
+        webrtc_url = args.webrtc or config.dev.webrtc_url
+        print(f"[Mode] WebRTC: {webrtc_url}")
+
+        app = ConversaApp(show_preview=not args.no_preview, webrtc_url=webrtc_url)
 
         # Handle signals
         def signal_handler(sig, frame):

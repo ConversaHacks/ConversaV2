@@ -6,6 +6,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, use system env vars only
+
 
 @dataclass
 class VADConfig:
@@ -18,8 +25,8 @@ class VADConfig:
     zero_cross_rate_max: float = 0.5
     speech_confirm_frames: int = 4  # ~100ms of speech to confirm
     silence_threshold_frames: int = 40  # ~1s of silence to stop
-    speech_confirm_time: float = 0.3  # seconds
-    silence_threshold_time: float = 3.0  # seconds
+    speech_confirm_time: float = 0.3  # seconds to confirm speech started
+    silence_threshold_time: float = 1.5  # seconds of silence to stop recording
 
 
 @dataclass
@@ -36,9 +43,8 @@ class RecordingConfig:
 class GeminiConfig:
     """Gemini API settings."""
     api_key: str = ""
-    base_url: str = "https://generativelanguage.googleapis.com"
+    base_url: str = "http://localhost:3030"
     model: str = "gemini-2.0-flash"
-    use_proxy: bool = False
     max_audio_bytes: int = 882000  # ~10 seconds of audio
     max_tokens: int = 1024
 
@@ -47,7 +53,6 @@ class GeminiConfig:
         self.api_key = os.getenv("GEMINI_API_KEY", self.api_key)
         self.base_url = os.getenv("GEMINI_BASE_URL", self.base_url)
         self.model = os.getenv("GEMINI_MODEL", self.model)
-        self.use_proxy = os.getenv("GEMINI_USE_PROXY", "false").lower() == "true"
 
 
 @dataclass
@@ -71,18 +76,29 @@ class PathConfig:
 
 
 @dataclass
+class DevConfig:
+    """Development settings."""
+    webrtc_url: str = "https://stream.simoonsong.com/api/webrtc?src=cam"
+
+    def __post_init__(self):
+        self.webrtc_url = os.getenv("DEV_WEBRTC_URL", self.webrtc_url)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     vad: VADConfig = None
     recording: RecordingConfig = None
     gemini: GeminiConfig = None
     paths: PathConfig = None
+    dev: DevConfig = None
 
     def __post_init__(self):
         self.vad = self.vad or VADConfig()
         self.recording = self.recording or RecordingConfig()
         self.gemini = self.gemini or GeminiConfig()
         self.paths = self.paths or PathConfig()
+        self.dev = self.dev or DevConfig()
         self.paths.ensure_directories()
 
 

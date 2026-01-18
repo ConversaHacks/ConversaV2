@@ -33,8 +33,8 @@ class WebRTCCapture:
         self._whep_url = self._build_whep_url(stream_url)
         self._pc: Optional[RTCPeerConnection] = None
 
-        # Frame buffer
-        self._frame_buffer: deque = deque(maxlen=30)
+        # Frame buffer - smaller for lower latency
+        self._frame_buffer: deque = deque(maxlen=5)
         self._latest_frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
 
@@ -123,10 +123,8 @@ class WebRTCCapture:
 
     async def _connect(self):
         """Connect to go2rtc WebRTC using WHEP."""
-        # Configure with STUN server
-        config = RTCConfiguration(
-            iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-        )
+        # No STUN needed for direct connection (lower latency)
+        config = RTCConfiguration(iceServers=[])
         self._pc = RTCPeerConnection(configuration=config)
 
         # Add transceivers for receiving media
@@ -193,8 +191,8 @@ class WebRTCCapture:
                     print(f"[WebRTCCapture] Received {self._frame_count} frames")
 
                 with self._lock:
-                    self._latest_frame = img.copy()
-                    self._frame_buffer.append((time.time(), img.copy()))
+                    self._latest_frame = img
+                    self._frame_buffer.append((time.time(), img))
 
                 if self._frame_callback:
                     self._frame_callback(img)
